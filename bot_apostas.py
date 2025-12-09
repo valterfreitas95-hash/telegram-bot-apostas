@@ -25,15 +25,37 @@ ODDS_API_KEY = os.getenv(
     "49885b2118d4019dd79add13adb938e1"
 )
 
-SPORT_KEYS = [
-    "soccer_epl",
-    "soccer_spain_la_liga",
-    "soccer_italy_serie_a",
-    "soccer_uefa_champs_league",
+# Escalão A – ligas grandes
+SPORT_KEYS_TIER_A = [
+    "soccer_epl",                  # Premier League
+    "soccer_spain_la_liga",        # La Liga
+    "soccer_italy_serie_a",        # Serie A
+    "soccer_germany_bundesliga",   # Bundesliga
+    "soccer_france_ligue_one",     # Ligue 1
+    "soccer_uefa_champs_league",   # Champions League
 ]
 
+# Escalão B – boas ligas para volume
+SPORT_KEYS_TIER_B = [
+    "soccer_brazil_campeonato",        # Brasileirão
+    "soccer_argentina_primera_division",
+    "soccer_netherlands_eredivisie",
+    "soccer_turkey_super_league",
+    "soccer_portugal_primeira_liga",
+    "soccer_belgium_first_division_a",
+    "soccer_usa_mls",
+]
+
+# Mistura tudo: Escalão A + Escalão B
+SPORT_KEYS = SPORT_KEYS_TIER_A + SPORT_KEYS_TIER_B
+
+# Região das casas de aposta
 ODDS_REGION = "uk"
+
+# Filtro de odd
 MAX_ODD = 1.40
+
+# Fuso horário
 TZ = ZoneInfo("America/Maceio")
 
 
@@ -42,6 +64,11 @@ TZ = ZoneInfo("America/Maceio")
 # ==========================
 
 def get_promising_bets():
+    """
+    Busca jogos na The Odds API e retorna apostas com odd <= 1.40
+    SOMENTE para jogos de HOJE (no fuso de Maceió),
+    misturando ligas de Escalão A e B.
+    """
     if not ODDS_API_KEY:
         return []
 
@@ -61,7 +88,8 @@ def get_promising_bets():
             resp = requests.get(url, params=params, timeout=15)
             resp.raise_for_status()
             data = resp.json()
-        except:
+        except Exception:
+            # Se der erro nesse esporte, ignora e segue
             continue
 
         for event in data:
@@ -69,13 +97,14 @@ def get_promising_bets():
             away = event.get("away_team")
             commence_str = event.get("commence_time")
 
+            # Conversão de horário
             try:
                 kickoff_utc = datetime.fromisoformat(
                     commence_str.replace("Z", "+00:00")
                 )
                 kickoff_local = kickoff_utc.astimezone(TZ)
                 kickoff_fmt = kickoff_local.strftime("%d/%m %H:%M")
-            except:
+            except Exception:
                 kickoff_local = None
                 kickoff_fmt = "horário indisponível"
 
@@ -118,7 +147,7 @@ def get_promising_bets():
             def maybe_add(team_name, odd, book):
                 if not odd:
                     return
-                # 📌 FILTRO FINAL: somente odds até 1.40
+                # 📌 Filtro: somente odds até 1.40
                 if odd <= MAX_ODD:
                     suggestions.append({
                         "league": league,
@@ -133,7 +162,7 @@ def get_promising_bets():
             maybe_add(home, best_home_odd, best_home_book)
             maybe_add(away, best_away_odd, best_away_book)
 
-    # 📌 Ordenar pelas maiores odds dentro do limite
+    # 📌 Ordena pelas MAIORES odds dentro do limite (mais perto de 1.40)
     suggestions.sort(key=lambda x: x["odd"], reverse=True)
 
     return suggestions
@@ -143,17 +172,21 @@ def get_promising_bets():
 # FORMATAÇÃO DE TEXTO
 # ==========================
 
-def format_bets_message(suggestions, limit=5):
+def format_bets_message(suggestions):
+    """
+    Formata a mensagem com TODAS as apostas encontradas.
+    Sem limite de 5 – lista tudo em ordem, numerado.
+    """
     if not suggestions:
         return (
-            "Hoje não encontrei nenhuma aposta dentro do filtro (odd ≤ 1.40).\n"
-            "_Pode ser falta de jogos hoje nas ligas configuradas._"
+            "Hoje não encontrei nenhuma aposta dentro do filtro (odd ≤ 1.40) "
+            "nas ligas configuradas.\n"
+            "_Pode ser falta de jogos hoje ou limite da API._"
         )
 
-    picks = suggestions[:limit]
-    lines = ["📊 *Apostas de Hoje* (Odd ≤ 1.40)\n"]
+    lines = ["📊 *Apostas de Hoje* (odd ≤ 1.40)\n"]
 
-    for i, p in enumerate(picks, 1):
+    for i, p in enumerate(suggestions, 1):
         lines.append(
             f"*{i}. {p['home']} x {p['away']}*\n"
             f"➡️ Sugestão: *{p['team_pick']}* vencer\n"
@@ -163,7 +196,7 @@ def format_bets_message(suggestions, limit=5):
             f"🏦 Casa: {p['book']}\n"
         )
 
-    lines.append("_Filtro: somente odds até 1.40._")
+    lines.append("_Filtro: somente odds até 1.40, misturando Escalão A e B._")
     lines.append("_Bot automático by Valter_")
 
     return "\n".join(lines)
@@ -176,7 +209,8 @@ def format_bets_message(suggestions, limit=5):
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
         "👋 Bem-vindo!\n\n"
-        "Eu envio *apostas de HOJE* com *odd até 1.40*.\n\n"
+        "Eu envio *apostas de HOJE* com *odd até 1.40*, "
+        "misturando ligas de Escalão A e B para ter o maior número possível de jogos.\n\n"
         "Comandos:\n"
         "/hoje – Buscar apostas de hoje\n"
         "/assinar – Receber todo dia às 10h\n"
@@ -219,7 +253,9 @@ async def assinar(update: Update, context: ContextTypes.DEFAULT_TYPE):
         chat_id=chat_id,
     )
 
-    await update.message.reply_text("✅ Envio diário ativado! Todo dia às 10h.")
+    await update.message.reply_text(
+        "✅ Envio diário ativado! Vou mandar as apostas todo dia às 10h."
+    )
 
 
 async def cancelar(update: Update, context: ContextTypes.DEFAULT_TYPE):
