@@ -5,6 +5,7 @@ from zoneinfo import ZoneInfo
 
 from telegram import Update
 from telegram.ext import (
+    Application,
     ApplicationBuilder,
     CommandHandler,
     ContextTypes,
@@ -14,9 +15,15 @@ from telegram.ext import (
 # CONFIGURAÇÕES DO BOT
 # ==========================
 
-# Tokens já configurados diretamente no código
-TELEGRAM_TOKEN = "8050775984:AAGHY52cHSLbp2Q71g_GtLfif9jIQJkC-s0"
-ODDS_API_KEY = "49885b2118d4019dd79add13adb938e1"
+# Se quiser deixar fixo no código, substitua as aspas pelos seus valores
+TELEGRAM_TOKEN = os.getenv(
+    "TELEGRAM_TOKEN",
+    "8050775984:AAGHY52cHSLbp2Q71g_GtLfif9jIQJkC-s0",  # seu token
+)
+ODDS_API_KEY = os.getenv(
+    "ODDS_API_KEY",
+    "49885b2118d4019dd79add13adb938e1",  # sua API key
+)
 
 # Esportes/Ligas que o bot vai analisar (pode ajustar depois)
 SPORT_KEYS = [
@@ -37,11 +44,18 @@ MIN_PROB = 0.70
 TZ = ZoneInfo("America/Maceio")
 
 
+# ==========================
+# FUNÇÃO PARA BUSCAR ODDS
+# ==========================
+
 def get_promising_bets():
     """
     Busca jogos na The Odds API e retorna uma lista de apostas promissoras
     seguindo o Modelo C: odd <= 1.40 ou prob >= 70%.
     """
+    if not ODDS_API_KEY or ODDS_API_KEY.startswith("COLOQUE_SUA_API_KEY"):
+        return []
+
     suggestions = []
 
     for sport in SPORT_KEYS:
@@ -68,7 +82,9 @@ def get_promising_bets():
 
             # Converte horário do jogo para fuso de Maceió
             try:
-                kickoff_utc = datetime.fromisoformat(commence_str.replace("Z", "+00:00"))
+                kickoff_utc = datetime.fromisoformat(
+                    commence_str.replace("Z", "+00:00")
+                )
                 kickoff_local = kickoff_utc.astimezone(TZ)
                 kickoff_fmt = kickoff_local.strftime("%d/%m %H:%M")
             except Exception:
@@ -95,6 +111,7 @@ def get_promising_bets():
                         price = o.get("price")
                         if not isinstance(price, (int, float)):
                             continue
+
                         if name == home:
                             if best_home_odd is None or price < best_home_odd:
                                 best_home_odd = price
@@ -125,6 +142,7 @@ def get_promising_bets():
             maybe_add_pick(home, best_home_odd, best_home_book)
             maybe_add_pick(away, best_away_odd, best_away_book)
 
+    # Ordena pela maior probabilidade (menor odd)
     suggestions.sort(key=lambda x: x["prob"], reverse=True)
     return suggestions
 
@@ -143,6 +161,7 @@ def format_bets_message(suggestions, limit=5):
     picks = suggestions[:limit]
     lines = []
     lines.append("📊 *Apostas promissoras do dia* (Modelo C)\n")
+
     for i, p in enumerate(picks, start=1):
         prob_pct = p["prob"] * 100
         lines.append(
@@ -159,6 +178,10 @@ def format_bets_message(suggestions, limit=5):
     lines.append("_Bot automático by Valter_")
     return "\n".join(lines)
 
+
+# ==========================
+# HANDLERS
+# ==========================
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     text = (
@@ -192,6 +215,7 @@ async def send_daily_bets(context: ContextTypes.DEFAULT_TYPE):
 async def assinar(update: Update, context: ContextTypes.DEFAULT_TYPE):
     chat_id = update.effective_chat.id
 
+    # Remove job antigo, se existir
     if context.job_queue:
         for job in context.job_queue.jobs():
             if job.chat_id == chat_id and job.name == f"daily_{chat_id}":
@@ -230,12 +254,16 @@ async def cancelar(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("Você não tinha assinatura ativa.")
 
 
+# ==========================
+# MAIN
+# ==========================
+
 def main():
     if not TELEGRAM_TOKEN:
         print("ERRO: TELEGRAM_TOKEN não configurado.")
         return
 
-    app = ApplicationBuilder().token(TELEGRAM_TOKEN).build()
+    app: Application = ApplicationBuilder().token(TELEGRAM_TOKEN).build()
 
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CommandHandler("hoje", hoje))
