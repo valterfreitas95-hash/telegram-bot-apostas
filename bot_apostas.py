@@ -5,7 +5,6 @@ import datetime
 import requests
 from math import isfinite
 from flask import Flask
-from telegram import Bot
 
 # ==============================
 # VARIÁVEIS DE AMBIENTE
@@ -27,12 +26,32 @@ if not CHAT_ID:
 if not ODDS_API_KEY:
     raise SystemExit("FALTA ODDS_API_KEY (sua chave da The Odds API).")
 
-bot = Bot(token=TELEGRAM_TOKEN)
-
 ODDS_API_URL = "https://api.the-odds-api.com/v4/sports/upcoming/odds"
 
 # ==============================
-# FUNÇÕES AUXILIARES
+# TELEGRAM (SEM BIBLIOTECA)
+# ==============================
+
+def enviar_telegram(msg: str):
+    url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
+    payload = {
+        "chat_id": CHAT_ID,
+        "text": msg,
+        "parse_mode": "Markdown",
+    }
+    try:
+        resp = requests.post(url, json=payload, timeout=20)
+        resp.raise_for_status()
+        print("📤 Mensagem enviada com sucesso ao Telegram.")
+    except Exception as e:
+        print("❌ Erro ao enviar mensagem para o Telegram:", e)
+        try:
+            print("Resposta:", resp.text)
+        except Exception:
+            pass
+
+# ==============================
+# MODELO C - FUNÇÕES
 # ==============================
 
 def agora_brasil():
@@ -40,12 +59,7 @@ def agora_brasil():
     return datetime.datetime.now(tz)
 
 def formatar_horario_iso(iso_str: str) -> str:
-    """
-    Converte o 'commence_time' da API (UTC) para horário de Brasília (UTC-3)
-    e devolve no formato DD/MM HH:MM.
-    """
     try:
-        # exemplo: "2025-12-10T20:00:00Z"
         if iso_str.endswith("Z"):
             iso_str = iso_str.replace("Z", "+00:00")
         dt_utc = datetime.datetime.fromisoformat(iso_str)
@@ -53,18 +67,14 @@ def formatar_horario_iso(iso_str: str) -> str:
         dt_br = dt_utc.astimezone(tz_brasil)
         return dt_br.strftime("%d/%m %H:%M")
     except Exception:
-        return iso_str  # se der erro, retorna cru mesmo
+        return iso_str
 
 def buscar_jogos_modelo_c():
-    """
-    Busca jogos na The Odds API e aplica a lógica do Modelo C:
-    - odd casa <= MAX_ODD OU prob implícita >= MIN_PROB
-    """
     params = {
         "apiKey": ODDS_API_KEY,
-        "regions": "eu",     # Europa (geralmente melhor cobertura)
-        "markets": "h2h",    # vencedor da partida
-        "oddsFormat": "decimal"
+        "regions": "eu",
+        "markets": "h2h",
+        "oddsFormat": "decimal",
     }
 
     print("\n🔎 Chamando The Odds API (Modelo C)...")
@@ -89,7 +99,6 @@ def buscar_jogos_modelo_c():
             if not bookmakers:
                 continue
 
-            # pega o primeiro bookmaker
             bk = bookmakers[0]
             casa_apostas = bk.get("title", "Casa não informada")
 
@@ -114,6 +123,7 @@ def buscar_jogos_modelo_c():
                 continue
 
             prob_impl = 1.0 / odd_casa
+
             if odd_casa <= MAX_ODD or prob_impl >= MIN_PROB:
                 selecionados.append({
                     "home": home_team,
@@ -126,13 +136,10 @@ def buscar_jogos_modelo_c():
                 })
 
         except Exception as e:
-            # não deixa um erro em um jogo quebrar tudo
             print("⚠️ Erro ao processar um evento:", e)
             continue
 
-    # ordena por horário
     selecionados.sort(key=lambda j: j["horario"])
-
     print(f"✅ Jogos selecionados pelo Modelo C: {len(selecionados)}")
     return selecionados
 
@@ -165,33 +172,23 @@ def montar_mensagem_modelo_c(jogos):
 
     return texto
 
-def enviar_modelo_c():
-    print("\n🚀 Rodando Modelo C e enviando para o Telegram...")
+def executar_modelo_c_uma_vez():
+    print("\n🚀 Rodando Modelo C...")
     jogos = buscar_jogos_modelo_c()
     msg = montar_mensagem_modelo_c(jogos)
-
-    try:
-        bot.send_message(chat_id=CHAT_ID, text=msg, parse_mode="Markdown")
-        print("📤 Mensagem enviada com sucesso!")
-    except Exception as e:
-        print("❌ Erro ao enviar mensagem para o Telegram:", e)
+    enviar_telegram(msg)
 
 def loop_trabalho():
-    """
-    Loop em segundo plano:
-    - roda o Modelo C
-    - espera 1 hora
-    """
     while True:
         try:
-            enviar_modelo_c()
+            executar_modelo_c_uma_vez()
         except Exception as e:
             print("❌ Erro inesperado no loop de trabalho:", e)
         print("⏳ Aguardando 1 hora para próxima execução...\n")
         time.sleep(3600)
 
 # ==============================
-# FLASK PARA O RENDER (WEB SERVICE)
+# FLASK PARA O RENDER
 # ==============================
 
 app = Flask(__name__)
@@ -205,10 +202,7 @@ def iniciar_loop_em_thread():
     t.start()
 
 if __name__ == "__main__":
-    # inicia o loop em segundo plano
     iniciar_loop_em_thread()
-
-    # sobe o servidor web para o Render ficar feliz 🙂
     port = int(os.getenv("PORT", "10000"))
     print(f"🌐 Subindo servidor Flask na porta {port}...")
     app.run(host="0.0.0.0", port=port)
