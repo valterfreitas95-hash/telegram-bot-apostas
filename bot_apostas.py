@@ -17,6 +17,12 @@ ODDS_API_KEY = (os.getenv("ODDS_API_KEY") or "").strip()
 MAX_ODD = float(os.getenv("MAX_ODD", "1.40"))   # limite de odd da casa
 MIN_PROB = float(os.getenv("MIN_PROB", "0.70")) # 70% = 0.70
 
+print("=== DEBUG VARIÁVEIS ===")
+print("TELEGRAM_TOKEN len:", len(TELEGRAM_TOKEN))
+print("CHAT_ID:", CHAT_ID)
+print("ODDS_API_KEY len:", len(ODDS_API_KEY))
+print("========================")
+
 if not TELEGRAM_TOKEN:
     raise SystemExit("FALTA TELEGRAM_TOKEN no ambiente.")
 
@@ -39,7 +45,7 @@ def enviar_telegram(msg: str):
         "text": msg,
         "parse_mode": "Markdown",
     }
-    print("📨 Enviando mensagem ao Telegram...")  # DEBUG
+    print("📨 Enviando mensagem ao Telegram...")
 
     try:
         resp = requests.post(url, json=payload, timeout=20)
@@ -53,11 +59,6 @@ def enviar_telegram(msg: str):
         print("❌ Erro ao enviar mensagem para o Telegram:", e)
         try:
             print("Resposta do Telegram:", resp.text)
-        except:
-            pass
-
-        try:
-            print("Resposta:", resp.text)
         except Exception:
             pass
 
