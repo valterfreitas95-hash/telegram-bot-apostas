@@ -3,6 +3,7 @@ import sys
 import time
 import datetime
 import requests
+from urllib.parse import urlparse
 from telegram import Bot
 
 # =====================================
@@ -15,7 +16,8 @@ TELEGRAM_TOKEN = (os.getenv("TELEGRAM_TOKEN") or "").strip()
 # Tenta ler CHAT_ID de duas formas possíveis
 CHAT_ID = (os.getenv("CHAT_ID") or os.getenv("TELEGRAM_CHAT_ID") or "").strip()
 
-API_URL_JOGOS = os.getenv("API_URL_JOGOS", "").strip()
+# URL da API de jogos
+API_URL_JOGOS = (os.getenv("API_URL_JOGOS") or "").strip()
 
 # DEBUG: MOSTRA O QUE FOI LIDO
 print("=== DEBUG VARIÁVEIS DE AMBIENTE ===")
@@ -42,6 +44,22 @@ if not CHAT_ID:
 else:
     print("✅ CHAT_ID encontrado.")
 
+# VALIDAÇÃO DA API_URL_JOGOS
+if not API_URL_JOGOS:
+    print("ERRO FATAL: API_URL_JOGOS não configurada nas variáveis de ambiente.")
+    print("→ Crie/ajuste a variável API_URL_JOGOS em Environment e redeploy.")
+    sys.exit(1)
+
+# Confere se a URL parece válida (tem esquema e host)
+parsed = urlparse(API_URL_JOGOS)
+if not parsed.scheme or not parsed.netloc:
+    print("ERRO FATAL: API_URL_JOGOS parece inválida:")
+    print(f"Valor atual: '{API_URL_JOGOS}'")
+    print("→ Ela deve ser algo como 'https://meu-servidor.com/algum-endpoint'")
+    sys.exit(1)
+
+print("✅ API_URL_JOGOS parece válida.")
+
 # Agora podemos criar o bot com segurança
 bot = Bot(token=TELEGRAM_TOKEN)
 
@@ -60,13 +78,9 @@ def buscar_jogos_do_dia(data_str: str):
     Busca todos os jogos do dia em TODAS as ligas disponíveis na API.
     A URL base deve estar em API_URL_JOGOS.
     """
-    if not API_URL_JOGOS:
-        print("⚠️ API_URL_JOGOS não configurada. Retornando lista vazia.")
-        return []
-
     url = f"{API_URL_JOGOS}?date={data_str}"
     print(f"\n🔎 Buscando TODOS os jogos do dia {data_str} em todas as ligas:")
-    print(url)
+    print(f"URL chamada: {url}")
 
     try:
         resposta = requests.get(url, timeout=20)
