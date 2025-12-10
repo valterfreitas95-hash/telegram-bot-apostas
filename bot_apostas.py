@@ -15,8 +15,8 @@ CHAT_ID = (os.getenv("CHAT_ID") or "").strip()
 ODDS_API_KEY = (os.getenv("ODDS_API_KEY") or "").strip()
 
 # Critérios do Modelo C
-MAX_ODD = float(os.getenv("MAX_ODD", "1.40"))
-MIN_PROB = float(os.getenv("MIN_PROB", "0.70"))  # 0.70 = 70%
+MAX_ODD = float(os.getenv("MAX_ODD", "1.40"))   # odd máxima da casa
+MIN_PROB = float(os.getenv("MIN_PROB", "0.70")) # prob mínima (70%)
 
 print("=== DEBUG VARIÁVEIS ===")
 print("TELEGRAM_TOKEN len:", len(TELEGRAM_TOKEN))
@@ -87,7 +87,12 @@ def formatar_horario(iso_str: str):
 
 
 def buscar_jogos_modelo_c():
-    """Busca jogos na The Odds API e aplica os filtros do Modelo C."""
+    """
+    Busca jogos na The Odds API, filtra apenas FUTEBOL
+    e retorna dois conjuntos:
+      - filtrados: que atendem o critério do Modelo C
+      - todos_futebol: todos os jogos de futebol com odd da casa válida
+    """
     params = {
         "apiKey": ODDS_API_KEY,
         "regions": "eu",
@@ -103,9 +108,10 @@ def buscar_jogos_modelo_c():
         dados = r.json()
     except Exception as e:
         print("❌ Erro ao consultar Odds API:", e)
-        return []
+        return [], []
 
-    selecionados = []
+    todos_futebol = []
+    filtrados = []
 
     for jogo in dados:
         try:
@@ -118,7 +124,6 @@ def buscar_jogos_modelo_c():
                 or "Soccer" in sport_title
                 or "Football" in sport_title
             ):
-                # Ignora basquete, tênis, etc.
                 continue
 
             home = jogo.get("home_team")
@@ -155,57 +160,89 @@ def buscar_jogos_modelo_c():
 
             prob = 1.0 / odd_home
 
-            # Critério do Modelo C
+            jogo_dict = {
+                "home": home,
+                "away": away,
+                "liga": liga,
+                "horario": horario,
+                "odd": odd_home,
+                "prob": prob,
+                "casa": book.get("title", "Casa"),
+            }
+
+            todos_futebol.append(jogo_dict)
+
+            # Critério do Modelo C (apostar na casa)
             if odd_home <= MAX_ODD or prob >= MIN_PROB:
-                selecionados.append(
-                    {
-                        "home": home,
-                        "away": away,
-                        "liga": liga,
-                        "horario": horario,
-                        "odd": odd_home,
-                        "prob": prob,
-                        "casa": book.get("title", "Casa"),
-                    }
-                )
+                filtrados.append(jogo_dict)
 
         except Exception as e:
             print("⚠️ Erro ao processar jogo:", e)
             continue
 
-    selecionados.sort(key=lambda j: j["horario"])
-    print(f"✅ Jogos filtrados (apenas futebol): {len(selecionados)}")
-    return selecionados
+    # Ordena por horário pra ficar organizado
+    todos_futebol.sort(key=lambda j: j["horario"])
+    filtrados.sort(key=lambda j: j["horario"])
+
+    print(f"✅ Jogos de futebol encontrados: {len(todos_futebol)}")
+    print(f"✅ Jogos que atendem o Modelo C: {len(filtrados)}")
+    return filtrados, todos_futebol
 
 
-def montar_mensagem(jogos):
+def montar_mensagem(jogos_filtrados, jogos_futebol):
     hoje = agora_brasil().strftime("%d/%m/%Y")
 
-    if not jogos:
-        return (
+    # Caso 1: tem jogos dentro do critério → usa só eles
+    if jogos_filtrados:
+        msg = (
+            f"📊 *Apostas promissoras do dia (Modelo C)*\n"
+            f"📅 {hoje}\n"
+            f"🎯 Critérios: odd casa ≤ {MAX_ODD:.2f} OU prob ≥ {MIN_PROB*100:.0f}%\n\n"
+        )
+
+        for i, j in enumerate(jogos_filtrados, 1):
+            msg += (
+                f"{i}. *{j['home']}* x {j['away']}\n"
+                f"🏆 Liga: {j['liga']}\n"
+                f"🕒 Horário: {formatar_horario(j['horario'])}\n"
+                f"💰 Odd casa: {j['odd']:.2f}\n"
+                f"📈 Prob. implícita: {j['prob']*100:.1f}%\n"
+                f"🏦 Casa: {j['casa']}\n\n"
+            )
+
+        return msg
+
+    # Caso 2: não tem ninguém dentro do critério, mas tem jogos de futebol
+    if jogos_futebol:
+        # pega os 5 com menor odd (mais favoritos)
+        top = sorted(jogos_futebol, key=lambda j: j["odd"])[:5]
+
+        msg = (
             f"📊 *Apostas promissoras do dia (Modelo C)*\n"
             f"📅 {hoje}\n\n"
-            f"⚠️ Nenhum jogo de futebol atendeu aos critérios hoje.\n"
-            f"🎯 Odd casa ≤ {MAX_ODD:.2f} ou prob ≥ {MIN_PROB*100:.0f}%."
+            f"⚠️ Nenhum jogo de futebol atendeu exatamente aos critérios "
+            f"(odd casa ≤ {MAX_ODD:.2f} OU prob ≥ {MIN_PROB*100:.0f}%).\n"
+            f"🔁 Então selecionei os *5 jogos com menor odd da casa* (mais favoritos):\n\n"
         )
 
-    msg = (
+        for i, j in enumerate(top, 1):
+            msg += (
+                f"{i}. *{j['home']}* x {j['away']}\n"
+                f"🏆 Liga: {j['liga']}\n"
+                f"🕒 Horário: {formatar_horario(j['horario'])}\n"
+                f"💰 Odd casa: {j['odd']:.2f}\n"
+                f"📈 Prob. implícita: {j['prob']*100:.1f}%\n"
+                f"🏦 Casa: {j['casa']}\n\n"
+            )
+
+        return msg
+
+    # Caso 3: nem a API trouxe jogos de futebol
+    return (
         f"📊 *Apostas promissoras do dia (Modelo C)*\n"
-        f"📅 {hoje}\n"
-        f"🎯 Critérios: odd casa ≤ {MAX_ODD:.2f} OU prob ≥ {MIN_PROB*100:.0f}%\n\n"
+        f"📅 {hoje}\n\n"
+        f"❌ A API não retornou jogos de futebol disponíveis no momento.\n"
     )
-
-    for i, j in enumerate(jogos, 1):
-        msg += (
-            f"{i}. *{j['home']}* x {j['away']}\n"
-            f"🏆 Liga: {j['liga']}\n"
-            f"🕒 Horário: {formatar_horario(j['horario'])}\n"
-            f"💰 Odd casa: {j['odd']:.2f}\n"
-            f"📈 Prob. implícita: {j['prob']*100:.1f}%\n"
-            f"🏦 Casa: {j['casa']}\n\n"
-        )
-
-    return msg
 
 
 # =====================================================
@@ -214,8 +251,8 @@ def montar_mensagem(jogos):
 
 def executar_modelo_c():
     print("\n🚀 Executando Modelo C (rodada completa)...")
-    jogos = buscar_jogos_modelo_c()
-    texto = montar_mensagem(jogos)
+    jogos_filtrados, jogos_futebol = buscar_jogos_modelo_c()
+    texto = montar_mensagem(jogos_filtrados, jogos_futebol)
     enviar_telegram(texto)
 
 
@@ -237,7 +274,7 @@ app = Flask(__name__)
 
 @app.route("/")
 def index():
-    return "BOT Apostas — Modelo C ONLINE (com /hoje)", 200
+    return "BOT Apostas — Modelo C ONLINE (com fallback e /hoje)", 200
 
 
 @app.route("/webhook", methods=["POST"])
@@ -258,7 +295,6 @@ def telegram_webhook():
         return "ok", 200
 
     if text.startswith("/hoje"):
-        # Responde rápido algo e depois roda o Modelo C
         enviar_telegram("⏳ Buscando jogos de hoje (Modelo C)...", chat_id=chat_id_in)
         try:
             executar_modelo_c()
