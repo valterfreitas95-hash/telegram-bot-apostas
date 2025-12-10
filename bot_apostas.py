@@ -1,292 +1,195 @@
-import os
 import requests
-from datetime import datetime, time as dtime
-from zoneinfo import ZoneInfo
-
-from telegram import Update
-from telegram.ext import (
-    Application,
-    ApplicationBuilder,
-    CommandHandler,
-    ContextTypes,
-)
+import datetime
+import os
+from typing import List, Dict, Any
 
 # ==========================
 # CONFIGURAÇÕES DO BOT
 # ==========================
 
-TELEGRAM_TOKEN = os.getenv(
-    "TELEGRAM_TOKEN",
-    "8050775984:AAGHY52cHSLbp2Q71g_GtLfif9jIQJkC-s0"
-)
+TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "COLOQUE_SEU_TOKEN_AQUI")
+TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID", "COLOQUE_SEU_CHAT_ID_AQUI")
 
-ODDS_API_KEY = os.getenv(
-    "ODDS_API_KEY",
-    "49885b2118d4019dd79add13adb938e1"
-)
+# Se você tiver uma API de odds, coloque aqui.
+API_URL = "https://sua-api-de-jogos.com/matches"  # EXEMPLO, substitua pela sua
+API_KEY = os.getenv("ODDS_API_KEY", "SUA_API_KEY_AQUI")
 
-# Escalão A – ligas grandes
-SPORT_KEYS_TIER_A = [
-    "soccer_epl",                  # Premier League
-    "soccer_spain_la_liga",        # La Liga
-    "soccer_italy_serie_a",        # Serie A
-    "soccer_germany_bundesliga",   # Bundesliga
-    "soccer_france_ligue_one",     # Ligue 1
-    "soccer_uefa_champs_league",   # Champions League
-]
+# ==========================
+# CONFIGURAÇÃO DE FILTRO
+# ==========================
+# 🔴 AQUI É ONDE VOCÊ REALMENTE CONTROLA O FILTRO
 
-# Escalão B – boas ligas para volume
-SPORT_KEYS_TIER_B = [
-    "soccer_brazil_campeonato",        # Brasileirão
-    "soccer_argentina_primera_division",
-    "soccer_netherlands_eredivisie",
-    "soccer_turkey_super_league",
-    "soccer_portugal_primeira_liga",
-    "soccer_belgium_first_division_a",
-    "soccer_usa_mls",
-]
+# Se quiser TODOS os jogos possíveis, sem limite de odd, deixe assim:
+MAX_ODD = None        # None = sem limite de odd (pega todas)
+MIN_PROB = None       # None = sem limite de probabilidade (pega todas)
 
-# Mistura tudo: Escalão A + Escalão B
-SPORT_KEYS = SPORT_KEYS_TIER_A + SPORT_KEYS_TIER_B
-
-# Região das casas de aposta
-ODDS_REGION = "uk"
-
-# Filtro de odd
-MAX_ODD = 1.40
-
-# Fuso horário
-TZ = ZoneInfo("America/Maceio")
+# Se quiser manter a lógica antiga (ex: até 1.40 ou >= 70% probabilidade),
+# basta trocar aqui:
+# MAX_ODD = 1.40
+# MIN_PROB = 0.70     # 70%
 
 
 # ==========================
-# BUSCA E FILTRO DE APOSTAS
+# BUSCA DE JOGOS NA API
 # ==========================
 
-def get_promising_bets():
+def buscar_todos_os_jogos(data: datetime.date) -> List[Dict[str, Any]]:
     """
-    Busca jogos na The Odds API e retorna apostas com odd <= 1.40
-    SOMENTE para jogos de HOJE (no fuso de Maceió),
-    misturando ligas de Escalão A e B.
+    Esta função deve buscar TODOS os jogos possíveis na sua fonte de dados,
+    sem filtrar por liga, escalão A/B etc.
+    Adapte o formato de acordo com a API que você usa.
     """
-    if not ODDS_API_KEY:
-        return []
+    params = {
+        "date": data.strftime("%Y-%m-%d"),
+        "api_key": API_KEY,
+        # importante: não filtrar por liga, divisão ou escalão aqui
+    }
 
-    suggestions = []
-    today = datetime.now(TZ).date()
+    response = requests.get(API_URL, params=params, timeout=30)
+    response.raise_for_status()
 
-    for sport in SPORT_KEYS:
-        url = f"https://api.the-odds-api.com/v4/sports/{sport}/odds"
-        params = {
-            "apiKey": ODDS_API_KEY,
-            "regions": ODDS_REGION,
-            "markets": "h2h",
-            "oddsFormat": "decimal",
-        }
+    # Aqui assumo que a API devolve uma lista de jogos em JSON
+    jogos = response.json()
+    return jogos
 
+
+# ==========================
+# FILTRO DE JOGOS (SEM ESCALÃO)
+# ==========================
+
+def calcular_probabilidade_implicita(odd: float) -> float:
+    """
+    Converte odd decimal em probabilidade implícita.
+    Ex.: odd 1.40 -> ~71.4%
+    """
+    if odd <= 0:
+        return 0.0
+    return 1.0 / odd
+
+
+def filtrar_jogos(jogos: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    """
+    Aplica APENAS os filtros de odd/probabilidade, SEM filtrar ligas,
+    SEM escalar A/B, SEM limitar quantidade de jogos.
+    """
+    jogos_filtrados = []
+
+    for jogo in jogos:
         try:
-            resp = requests.get(url, params=params, timeout=15)
-            resp.raise_for_status()
-            data = resp.json()
-        except Exception:
-            # Se der erro nesse esporte, ignora e segue
+            # Ajuste esses campos para bater com o retorno da sua API
+            odd_casa = float(jogo.get("home_odds", 0))
+            odd_empate = float(jogo.get("draw_odds", 0))
+            odd_fora = float(jogo.get("away_odds", 0))
+
+            # Exemplo: escolher a odd que você usa como base (vitória da casa, por exemplo)
+            odd_base = odd_casa
+
+            if odd_base <= 0:
+                continue
+
+            prob_implicita = calcular_probabilidade_implicita(odd_base)
+
+            # ---------- FILTRO DE ODD ----------
+            if MAX_ODD is not None and odd_base > MAX_ODD:
+                continue
+
+            # ---------- FILTRO DE PROBABILIDADE ----------
+            if MIN_PROB is not None and prob_implicita < MIN_PROB:
+                continue
+
+            # Se passou nos filtros, adiciona o jogo
+            jogo["odd_base"] = odd_base
+            jogo["prob_implicita"] = prob_implicita
+            jogos_filtrados.append(jogo)
+
+        except Exception as e:
+            # Se der erro em algum jogo específico, ignora ele
+            print(f"Erro ao processar jogo: {e}")
             continue
 
-        for event in data:
-            home = event.get("home_team")
-            away = event.get("away_team")
-            commence_str = event.get("commence_time")
-
-            # Conversão de horário
-            try:
-                kickoff_utc = datetime.fromisoformat(
-                    commence_str.replace("Z", "+00:00")
-                )
-                kickoff_local = kickoff_utc.astimezone(TZ)
-                kickoff_fmt = kickoff_local.strftime("%d/%m %H:%M")
-            except Exception:
-                kickoff_local = None
-                kickoff_fmt = "horário indisponível"
-
-            # 📌 FILTRA APENAS JOGOS DE HOJE
-            if not kickoff_local or kickoff_local.date() != today:
-                continue
-
-            bookmakers = event.get("bookmakers", [])
-            if not bookmakers:
-                continue
-
-            best_home_odd = None
-            best_away_odd = None
-            best_home_book = None
-            best_away_book = None
-
-            for b in bookmakers:
-                book_name = b.get("title") or b.get("key")
-                markets = b.get("markets", [])
-                for m in markets:
-                    if m.get("key") != "h2h":
-                        continue
-                    for o in m.get("outcomes", []):
-                        team = o.get("name")
-                        price = o.get("price")
-                        if not isinstance(price, (int, float)):
-                            continue
-
-                        if team == home:
-                            if best_home_odd is None or price < best_home_odd:
-                                best_home_odd = price
-                                best_home_book = book_name
-                        elif team == away:
-                            if best_away_odd is None or price < best_away_odd:
-                                best_away_odd = price
-                                best_away_book = book_name
-
-            league = event.get("sport_title", sport)
-
-            def maybe_add(team_name, odd, book):
-                if not odd:
-                    return
-                # 📌 Filtro: somente odds até 1.40
-                if odd <= MAX_ODD:
-                    suggestions.append({
-                        "league": league,
-                        "home": home,
-                        "away": away,
-                        "team_pick": team_name,
-                        "odd": odd,
-                        "book": book,
-                        "kickoff": kickoff_fmt,
-                    })
-
-            maybe_add(home, best_home_odd, best_home_book)
-            maybe_add(away, best_away_odd, best_away_book)
-
-    # 📌 Ordena pelas MAIORES odds dentro do limite (mais perto de 1.40)
-    suggestions.sort(key=lambda x: x["odd"], reverse=True)
-
-    return suggestions
+    # IMPORTANTE: NÃO LIMITAR A QUANTIDADE AQUI
+    # Nada de [:5], nada de contagem, deixa todos passarem
+    return jogos_filtrados
 
 
 # ==========================
-# FORMATAÇÃO DE TEXTO
+# FORMATAÇÃO DA MENSAGEM
 # ==========================
 
-def format_bets_message(suggestions):
+def formatar_mensagem(jogos: List[Dict[str, Any]], data: datetime.date) -> str:
     """
-    Formata a mensagem com TODAS as apostas encontradas.
-    Sem limite de 5 – lista tudo em ordem, numerado.
+    Monta o texto que vai ser enviado para o Telegram.
     """
-    if not suggestions:
-        return (
-            "Hoje não encontrei nenhuma aposta dentro do filtro (odd ≤ 1.40) "
-            "nas ligas configuradas.\n"
-            "_Pode ser falta de jogos hoje ou limite da API._"
+    if not jogos:
+        return f"📊 Nenhum jogo encontrado para {data.strftime('%d/%m/%Y')} com os filtros atuais."
+
+    linhas = []
+    linhas.append(f"📊 Apostas do dia {data.strftime('%d/%m/%Y')}")
+    linhas.append("")
+
+    for idx, jogo in enumerate(jogos, start=1):
+        casa = jogo.get("home_team", "Time da Casa")
+        fora = jogo.get("away_team", "Time Visitante")
+        liga = jogo.get("league", "Liga desconhecida")
+        horario = jogo.get("start_time", "")  # formato string, ex: "18:30"
+
+        odd_base = jogo.get("odd_base", 0)
+        prob_imp = jogo.get("prob_implicita", 0) * 100  # em %
+
+        bloco = (
+            f"{idx}. {casa} x {fora}\n"
+            f"➡️ Sugestão: Vitória do time da casa\n"
+            f"🏆 Liga: {liga}\n"
+            f"🕒 Horário: {horario}\n"
+            f"💰 Odd: {odd_base:.2f}\n"
+            f"📈 Prob. implícita: {prob_imp:.1f}%\n"
         )
+        linhas.append(bloco)
 
-    lines = ["📊 *Apostas de Hoje* (odd ≤ 1.40)\n"]
-
-    for i, p in enumerate(suggestions, 1):
-        lines.append(
-            f"*{i}. {p['home']} x {p['away']}*\n"
-            f"➡️ Sugestão: *{p['team_pick']}* vencer\n"
-            f"🏆 Liga: {p['league']}\n"
-            f"🕒 Horário: {p['kickoff']}\n"
-            f"💰 Odd: *{p['odd']:.2f}*\n"
-            f"🏦 Casa: {p['book']}\n"
-        )
-
-    lines.append("_Filtro: somente odds até 1.40, misturando Escalão A e B._")
-    lines.append("_Bot automático by Valter_")
-
-    return "\n".join(lines)
+    return "\n".join(linhas)
 
 
 # ==========================
-# HANDLERS DO TELEGRAM
+# ENVIO PARA TELEGRAM
 # ==========================
 
-async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text(
-        "👋 Bem-vindo!\n\n"
-        "Eu envio *apostas de HOJE* com *odd até 1.40*, "
-        "misturando ligas de Escalão A e B para ter o maior número possível de jogos.\n\n"
-        "Comandos:\n"
-        "/hoje – Buscar apostas de hoje\n"
-        "/assinar – Receber todo dia às 10h\n"
-        "/cancelar – Parar envio diário\n"
-    )
+def enviar_para_telegram(texto: str) -> None:
+    """
+    Envia mensagem de texto para o chat configurado no Telegram.
+    """
+    url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
+    payload = {
+        "chat_id": TELEGRAM_CHAT_ID,
+        "text": texto,
+        "parse_mode": "HTML",
+    }
 
-
-async def hoje(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text("⏳ Buscando apostas de hoje...")
-    suggestions = get_promising_bets()
-    msg = format_bets_message(suggestions)
-    await update.message.reply_text(msg, parse_mode="Markdown")
-
-
-async def send_daily_bets(context: ContextTypes.DEFAULT_TYPE):
-    suggestions = get_promising_bets()
-    msg = format_bets_message(suggestions)
-    await context.bot.send_message(
-        chat_id=context.job.chat_id,
-        text=msg,
-        parse_mode="Markdown",
-    )
-
-
-async def assinar(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    chat_id = update.effective_chat.id
-
-    # remove jobs antigos
-    for job in context.job_queue.jobs():
-        if job.chat_id == chat_id:
-            job.schedule_removal()
-
-    run_time = dtime(10, 0, tzinfo=TZ)
-
-    context.job_queue.run_daily(
-        send_daily_bets,
-        time=run_time,
-        days=(0, 1, 2, 3, 4, 5, 6),
-        name=f"daily_{chat_id}",
-        chat_id=chat_id,
-    )
-
-    await update.message.reply_text(
-        "✅ Envio diário ativado! Vou mandar as apostas todo dia às 10h."
-    )
-
-
-async def cancelar(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    chat_id = update.effective_chat.id
-    removed = False
-
-    for job in context.job_queue.jobs():
-        if job.chat_id == chat_id:
-            job.schedule_removal()
-            removed = True
-
-    if removed:
-        await update.message.reply_text("🚫 Envios diários cancelados.")
-    else:
-        await update.message.reply_text("Você não tinha envio diário ativado.")
+    resp = requests.post(url, json=payload, timeout=30)
+    if not resp.ok:
+        print("Erro ao enviar mensagem para o Telegram:", resp.text)
 
 
 # ==========================
-# MAIN
+# FUNÇÃO PRINCIPAL
 # ==========================
 
 def main():
-    app: Application = ApplicationBuilder().token(TELEGRAM_TOKEN).build()
+    # Exemplo: buscar jogos de HOJE
+    hoje = datetime.date.today()
 
-    app.add_handler(CommandHandler("start", start))
-    app.add_handler(CommandHandler("hoje", hoje))
-    app.add_handler(CommandHandler("assinar", assinar))
-    app.add_handler(CommandHandler("cancelar", cancelar))
+    print(f"Buscando todos os jogos de {hoje}...")
+    jogos_brutos = buscar_todos_os_jogos(hoje)
 
-    print("Bot iniciado. Aguardando mensagens...")
-    app.run_polling()
+    print(f"Total de jogos retornados pela API: {len(jogos_brutos)}")
+
+    # AQUI NÃO TEM ESCALÃO A/B, NEM LIMITE DE QUANTIDADE
+    jogos_filtrados = filtrar_jogos(jogos_brutos)
+
+    print(f"Total de jogos após filtros: {len(jogos_filtrados)}")
+
+    mensagem = formatar_mensagem(jogos_filtrados, hoje)
+    enviar_para_telegram(mensagem)
+    print("Mensagem enviada para o Telegram.")
 
 
 if __name__ == "__main__":
