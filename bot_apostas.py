@@ -1,178 +1,214 @@
 import os
-import sys
 import time
+import threading
 import datetime
 import requests
-from urllib.parse import urlparse
+from math import isfinite
+from flask import Flask
 from telegram import Bot
 
-# =====================================
-# LENDO VARIÁVEIS DE AMBIENTE
-# =====================================
+# ==============================
+# VARIÁVEIS DE AMBIENTE
+# ==============================
 
-# Lê o token do bot (e já tira espaços em branco)
 TELEGRAM_TOKEN = (os.getenv("TELEGRAM_TOKEN") or "").strip()
+CHAT_ID = (os.getenv("CHAT_ID") or "").strip()
+ODDS_API_KEY = (os.getenv("ODDS_API_KEY") or "").strip()
 
-# Tenta ler CHAT_ID de duas formas possíveis
-CHAT_ID = (os.getenv("CHAT_ID") or os.getenv("TELEGRAM_CHAT_ID") or "").strip()
+MAX_ODD = float(os.getenv("MAX_ODD", "1.40"))   # limite de odd da casa
+MIN_PROB = float(os.getenv("MIN_PROB", "0.70")) # 70% = 0.70
 
-# URL da API de jogos
-API_URL_JOGOS = (os.getenv("API_URL_JOGOS") or "").strip()
-
-# DEBUG: MOSTRA O QUE FOI LIDO
-print("=== DEBUG VARIÁVEIS DE AMBIENTE ===")
-print(f"TELEGRAM_TOKEN len={len(TELEGRAM_TOKEN)} valor='{TELEGRAM_TOKEN}'")
-print(f"CHAT_ID='{CHAT_ID}'")
-print(f"API_URL_JOGOS='{API_URL_JOGOS}'")
-print("===================================")
-
-# VALIDAÇÃO DO TOKEN
 if not TELEGRAM_TOKEN:
-    print("ERRO FATAL: TELEGRAM_TOKEN NÃO ENCONTRADO NO AMBIENTE DO RENDER.")
-    print("→ Crie/ajuste a variável TELEGRAM_TOKEN em Environment e redeploy.")
-    sys.exit(1)
+    raise SystemExit("FALTA TELEGRAM_TOKEN no ambiente.")
 
-if ":" not in TELEGRAM_TOKEN or not TELEGRAM_TOKEN.split(":")[0].isdigit():
-    print("ERRO FATAL: TELEGRAM_TOKEN COM FORMATO INVÁLIDO.")
-    print("→ Ele deve ser algo como '123456789:AAAAA...'.")
-    sys.exit(1)
-
-# VALIDAÇÃO DO CHAT_ID
 if not CHAT_ID:
-    print("⚠️ AVISO: CHAT_ID não configurado (CHAT_ID ou TELEGRAM_CHAT_ID).")
-    print("→ Mensagens para o Telegram vão falhar ao enviar.")
-else:
-    print("✅ CHAT_ID encontrado.")
+    raise SystemExit("FALTA CHAT_ID no ambiente.")
 
-# VALIDAÇÃO DA API_URL_JOGOS
-if not API_URL_JOGOS:
-    print("ERRO FATAL: API_URL_JOGOS não configurada nas variáveis de ambiente.")
-    print("→ Crie/ajuste a variável API_URL_JOGOS em Environment e redeploy.")
-    sys.exit(1)
+if not ODDS_API_KEY:
+    raise SystemExit("FALTA ODDS_API_KEY (sua chave da The Odds API).")
 
-# Confere se a URL parece válida (tem esquema e host)
-parsed = urlparse(API_URL_JOGOS)
-if not parsed.scheme or not parsed.netloc:
-    print("ERRO FATAL: API_URL_JOGOS parece inválida:")
-    print(f"Valor atual: '{API_URL_JOGOS}'")
-    print("→ Ela deve ser algo como 'https://meu-servidor.com/algum-endpoint'")
-    sys.exit(1)
-
-print("✅ API_URL_JOGOS parece válida.")
-
-# Agora podemos criar o bot com segurança
 bot = Bot(token=TELEGRAM_TOKEN)
 
+ODDS_API_URL = "https://api.the-odds-api.com/v4/sports/upcoming/odds"
 
-# =====================================
+# ==============================
 # FUNÇÕES AUXILIARES
-# =====================================
+# ==============================
 
-def data_hoje_str():
-    hoje = datetime.datetime.now()
-    return hoje.strftime("%Y-%m-%d")
+def agora_brasil():
+    tz = datetime.timezone(datetime.timedelta(hours=-3))
+    return datetime.datetime.now(tz)
 
-
-def buscar_jogos_do_dia(data_str: str):
+def formatar_horario_iso(iso_str: str) -> str:
     """
-    Busca todos os jogos do dia em TODAS as ligas disponíveis na API.
-    A URL base deve estar em API_URL_JOGOS.
+    Converte o 'commence_time' da API (UTC) para horário de Brasília (UTC-3)
+    e devolve no formato DD/MM HH:MM.
     """
-    url = f"{API_URL_JOGOS}?date={data_str}"
-    print(f"\n🔎 Buscando TODOS os jogos do dia {data_str} em todas as ligas:")
-    print(f"URL chamada: {url}")
-
     try:
-        resposta = requests.get(url, timeout=20)
-        resposta.raise_for_status()
-    except requests.exceptions.RequestException as e:
-        print("❌ Erro ao conectar na API de jogos:")
-        print(e)
+        # exemplo: "2025-12-10T20:00:00Z"
+        if iso_str.endswith("Z"):
+            iso_str = iso_str.replace("Z", "+00:00")
+        dt_utc = datetime.datetime.fromisoformat(iso_str)
+        tz_brasil = datetime.timezone(datetime.timedelta(hours=-3))
+        dt_br = dt_utc.astimezone(tz_brasil)
+        return dt_br.strftime("%d/%m %H:%M")
+    except Exception:
+        return iso_str  # se der erro, retorna cru mesmo
+
+def buscar_jogos_modelo_c():
+    """
+    Busca jogos na The Odds API e aplica a lógica do Modelo C:
+    - odd casa <= MAX_ODD OU prob implícita >= MIN_PROB
+    """
+    params = {
+        "apiKey": ODDS_API_KEY,
+        "regions": "eu",     # Europa (geralmente melhor cobertura)
+        "markets": "h2h",    # vencedor da partida
+        "oddsFormat": "decimal"
+    }
+
+    print("\n🔎 Chamando The Odds API (Modelo C)...")
+    try:
+        resp = requests.get(ODDS_API_URL, params=params, timeout=25)
+        resp.raise_for_status()
+        jogos_brutos = resp.json()
+    except Exception as e:
+        print("❌ Erro ao chamar a The Odds API:", e)
         return []
 
-    try:
-        dados = resposta.json()
-    except ValueError:
-        print("❌ Erro ao decodificar JSON da resposta da API.")
-        return []
+    selecionados = []
 
-    jogos = []
+    for evento in jogos_brutos:
+        try:
+            home_team = evento.get("home_team") or "Time da casa"
+            away_team = evento.get("away_team") or "Time visitante"
+            liga = evento.get("sport_title") or evento.get("sport_key") or "Liga não informada"
+            commence_time = evento.get("commence_time", "")
 
-    for jogo in dados:
-        home = jogo.get("home_team") or jogo.get("home") or "Time da Casa"
-        away = jogo.get("away_team") or jogo.get("away") or "Time Visitante"
-        horario = jogo.get("commence_time") or jogo.get("time") or "Horário não informado"
-        liga = jogo.get("league") or jogo.get("liga") or "Liga não informada"
-        odd_casa = (
-            jogo.get("odd_casa")
-            or jogo.get("home_price")
-            or jogo.get("odd")
-            or "-"
-        )
+            bookmakers = evento.get("bookmakers") or []
+            if not bookmakers:
+                continue
 
-        jogos.append(
-            {
-                "home": home,
-                "away": away,
-                "horario": horario,
-                "liga": liga,
-                "odd_casa": odd_casa,
-            }
-        )
+            # pega o primeiro bookmaker
+            bk = bookmakers[0]
+            casa_apostas = bk.get("title", "Casa não informada")
 
-    print(f"✅ Total de jogos encontrados para {data_str}: {len(jogos)}")
-    return jogos
+            markets = bk.get("markets") or []
+            mercado_h2h = None
+            for m in markets:
+                if m.get("key") == "h2h":
+                    mercado_h2h = m
+                    break
 
+            if not mercado_h2h:
+                continue
 
-def formatar_mensagem_jogos(jogos, data_str: str):
+            outcomes = mercado_h2h.get("outcomes") or []
+            odd_casa = None
+            for o in outcomes:
+                if o.get("name") == home_team:
+                    odd_casa = float(o.get("price"))
+                    break
+
+            if not odd_casa or not isfinite(odd_casa):
+                continue
+
+            prob_impl = 1.0 / odd_casa
+            if odd_casa <= MAX_ODD or prob_impl >= MIN_PROB:
+                selecionados.append({
+                    "home": home_team,
+                    "away": away_team,
+                    "liga": liga,
+                    "horario": commence_time,
+                    "odd": odd_casa,
+                    "prob": prob_impl,
+                    "casa_apostas": casa_apostas,
+                })
+
+        except Exception as e:
+            # não deixa um erro em um jogo quebrar tudo
+            print("⚠️ Erro ao processar um evento:", e)
+            continue
+
+    # ordena por horário
+    selecionados.sort(key=lambda j: j["horario"])
+
+    print(f"✅ Jogos selecionados pelo Modelo C: {len(selecionados)}")
+    return selecionados
+
+def montar_mensagem_modelo_c(jogos):
     if not jogos:
+        hoje = agora_brasil().strftime("%d/%m/%Y")
         return (
-            f"⚠️ Não encontrei jogos para o dia *{data_str}* "
-            f"ou a API não retornou resultados no momento."
+            f"📊 *Apostas promissoras do dia (Modelo C)*\n\n"
+            f"⚠️ Nenhum jogo encontrado dentro dos critérios para hoje ({hoje}).\n"
+            f"Critérios: odd casa ≤ {MAX_ODD:.2f} ou prob. implícita ≥ {MIN_PROB*100:.0f}%."
         )
 
-    texto = f"📅 *Jogos do dia {data_str}*\n"
-    texto += "🔁 Considerando TODAS as ligas disponíveis na API.\n\n"
+    hoje = agora_brasil().strftime("%d/%m/%Y")
+    texto = f"📊 *Apostas promissoras do dia (Modelo C)*\n"
+    texto += f"📅 Referência: {hoje}\n"
+    texto += f"🎯 Critérios: odd casa ≤ {MAX_ODD:.2f} OU prob. ≥ {MIN_PROB*100:.0f}%\n\n"
 
-    for i, jogo in enumerate(jogos, start=1):
+    for i, j in enumerate(jogos, start=1):
+        horario_fmt = formatar_horario_iso(j["horario"])
+        prob_pct = j["prob"] * 100
         texto += (
-            f"{i}. {jogo['home']} x {jogo['away']}\n"
-            f"🏆 Liga: {jogo['liga']}\n"
-            f"🕒 Horário: {jogo['horario']}\n"
-            f"💰 Odd casa (se disponível): {jogo['odd_casa']}\n\n"
+            f"{i}. {j['home']} x {j['away']}\n"
+            f"➡️ Sugestão: {j['home']} vencer\n"
+            f"🏆 Liga: {j['liga']}\n"
+            f"🕒 Horário: {horario_fmt}\n"
+            f"💰 Odd: {j['odd']:.2f}\n"
+            f"📈 Prob. implícita: {prob_pct:.1f}%\n"
+            f"🏦 Casa: {j['casa_apostas']}\n\n"
         )
 
     return texto
 
-
-def rodar_bot_uma_vez():
-    print("\n🚀 BOT INICIADO (execução única)\n")
-
-    data_str = data_hoje_str()
-    print(f"📅 Buscando jogos do dia: {data_str}")
-
-    jogos = buscar_jogos_do_dia(data_str)
-    msg = formatar_mensagem_jogos(jogos, data_str)
-
-    if not CHAT_ID:
-        print("❌ Não foi possível enviar a mensagem: CHAT_ID não configurado.")
-        return
+def enviar_modelo_c():
+    print("\n🚀 Rodando Modelo C e enviando para o Telegram...")
+    jogos = buscar_jogos_modelo_c()
+    msg = montar_mensagem_modelo_c(jogos)
 
     try:
         bot.send_message(chat_id=CHAT_ID, text=msg, parse_mode="Markdown")
-        print("\n📤 Mensagem enviada ao Telegram com sucesso!")
+        print("📤 Mensagem enviada com sucesso!")
     except Exception as e:
-        print("❌ Erro ao enviar mensagem para o Telegram:")
-        print(e)
+        print("❌ Erro ao enviar mensagem para o Telegram:", e)
 
-
-if __name__ == "__main__":
+def loop_trabalho():
+    """
+    Loop em segundo plano:
+    - roda o Modelo C
+    - espera 1 hora
+    """
     while True:
         try:
-            rodar_bot_uma_vez()
+            enviar_modelo_c()
         except Exception as e:
-            print("❌ Erro inesperado no loop principal do bot:")
-            print(e)
-
-        print("⏳ Aguardando 1 hora para a próxima execução...\n")
+            print("❌ Erro inesperado no loop de trabalho:", e)
+        print("⏳ Aguardando 1 hora para próxima execução...\n")
         time.sleep(3600)
+
+# ==============================
+# FLASK PARA O RENDER (WEB SERVICE)
+# ==============================
+
+app = Flask(__name__)
+
+@app.route("/")
+def index():
+    return "OK - Bot de apostas (Modelo C) rodando.", 200
+
+def iniciar_loop_em_thread():
+    t = threading.Thread(target=loop_trabalho, daemon=True)
+    t.start()
+
+if __name__ == "__main__":
+    # inicia o loop em segundo plano
+    iniciar_loop_em_thread()
+
+    # sobe o servidor web para o Render ficar feliz 🙂
+    port = int(os.getenv("PORT", "10000"))
+    print(f"🌐 Subindo servidor Flask na porta {port}...")
+    app.run(host="0.0.0.0", port=port)
