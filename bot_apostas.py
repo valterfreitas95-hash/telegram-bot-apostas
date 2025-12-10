@@ -185,10 +185,10 @@ def montar_mensagem_modelo_c(jogos):
     return texto
 
 def executar_modelo_c_uma_vez():
-    print("\n🚀 Rodando Modelo C...")
-    jogos = buscar_jogos_modelo_c()
-    msg = montar_mensagem_modelo_c(jogos)
+    print("\n🚀 Rodando Modelo C (TESTE SIMPLES)...")
+    msg = "🧪 Teste simples do bot de apostas.\nSe você recebeu esta mensagem, o envio para o Telegram está funcionando."
     enviar_telegram(msg)
+
 
 def loop_trabalho():
     while True:
