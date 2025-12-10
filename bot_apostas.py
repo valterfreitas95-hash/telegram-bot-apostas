@@ -1,48 +1,70 @@
-import requests
-import datetime
-import time
 import os
+import sys
+import time
+import datetime
+import requests
 from telegram import Bot
 
 # =====================================
-# CONFIGURAÇÕES
+# LENDO VARIÁVEIS DE AMBIENTE
 # =====================================
-TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN")
-CHAT_ID = os.getenv("CHAT_ID")
 
-# URL base da sua API de jogos
-# Aqui você adapta para a URL que já estava usando no seu projeto.
-# A ideia é: essa API deve devolver TODOS os jogos do dia,
-# de TODAS AS LIGAS disponíveis, sem filtro por escalão.
-API_URL = os.getenv("API_URL_JOGOS")  # exemplo: "https://sua-api.com/jogos"
+# Lê o token do bot (e já tira espaços em branco)
+TELEGRAM_TOKEN = (os.getenv("TELEGRAM_TOKEN") or "").strip()
 
+# Tenta ler CHAT_ID de duas formas possíveis
+CHAT_ID = (os.getenv("CHAT_ID") or os.getenv("TELEGRAM_CHAT_ID") or "").strip()
+
+API_URL_JOGOS = os.getenv("API_URL_JOGOS", "").strip()
+
+# DEBUG: MOSTRA O QUE FOI LIDO
+print("=== DEBUG VARIÁVEIS DE AMBIENTE ===")
+print(f"TELEGRAM_TOKEN len={len(TELEGRAM_TOKEN)} valor='{TELEGRAM_TOKEN}'")
+print(f"CHAT_ID='{CHAT_ID}'")
+print(f"API_URL_JOGOS='{API_URL_JOGOS}'")
+print("===================================")
+
+# VALIDAÇÃO DO TOKEN
+if not TELEGRAM_TOKEN:
+    print("ERRO FATAL: TELEGRAM_TOKEN NÃO ENCONTRADO NO AMBIENTE DO RENDER.")
+    print("→ Crie/ajuste a variável TELEGRAM_TOKEN em Environment e redeploy.")
+    sys.exit(1)
+
+if ":" not in TELEGRAM_TOKEN or not TELEGRAM_TOKEN.split(":")[0].isdigit():
+    print("ERRO FATAL: TELEGRAM_TOKEN COM FORMATO INVÁLIDO.")
+    print("→ Ele deve ser algo como '123456789:AAAAA...'.")
+    sys.exit(1)
+
+# VALIDAÇÃO DO CHAT_ID
+if not CHAT_ID:
+    print("⚠️ AVISO: CHAT_ID não configurado (CHAT_ID ou TELEGRAM_CHAT_ID).")
+    print("→ Mensagens para o Telegram vão falhar ao enviar.")
+else:
+    print("✅ CHAT_ID encontrado.")
+
+# Agora podemos criar o bot com segurança
 bot = Bot(token=TELEGRAM_TOKEN)
 
 
 # =====================================
-# FUNÇÃO AUXILIAR: DATA DE HOJE (AAAA-MM-DD)
+# FUNÇÕES AUXILIARES
 # =====================================
+
 def data_hoje_str():
     hoje = datetime.datetime.now()
     return hoje.strftime("%Y-%m-%d")
 
 
-# =====================================
-# BUSCAR TODOS OS JOGOS DO DIA
-# - sem filtro de liga
-# - sem filtro de escalão
-# - apenas pela data
-# =====================================
 def buscar_jogos_do_dia(data_str: str):
     """
     Busca todos os jogos do dia em TODAS as ligas disponíveis na API.
-    Pressupõe que sua API aceite um parâmetro de data, por exemplo ?date=AAAA-MM-DD
-    e retorne uma lista de jogos em JSON.
+    A URL base deve estar em API_URL_JOGOS.
     """
+    if not API_URL_JOGOS:
+        print("⚠️ API_URL_JOGOS não configurada. Retornando lista vazia.")
+        return []
 
-    # Monte a URL de acordo com a sua API.
-    # Se sua API já recebe a data de outra forma, é só adaptar.
-    url = f"{API_URL}?date={data_str}"
+    url = f"{API_URL_JOGOS}?date={data_str}"
     print(f"\n🔎 Buscando TODOS os jogos do dia {data_str} em todas as ligas:")
     print(url)
 
@@ -62,22 +84,11 @@ def buscar_jogos_do_dia(data_str: str):
 
     jogos = []
 
-    # Aqui eu assumo uma estrutura genérica de jogo.
-    # Adapte os nomes dos campos conforme o JSON REAL da sua API.
     for jogo in dados:
-        # Exemplo de campos esperados:
-        # - jogo["home_team"]
-        # - jogo["away_team"]
-        # - jogo["commence_time"] ou jogo["time"]
-        # - jogo["league"] / jogo["liga"] (opcional, só pra exibir)
-        # - jogo["odd"] ou jogo["odds_casa"] (se quiser mostrar odds)
-
         home = jogo.get("home_team") or jogo.get("home") or "Time da Casa"
         away = jogo.get("away_team") or jogo.get("away") or "Time Visitante"
         horario = jogo.get("commence_time") or jogo.get("time") or "Horário não informado"
         liga = jogo.get("league") or jogo.get("liga") or "Liga não informada"
-
-        # Se tiver odd da casa e você quiser exibir:
         odd_casa = (
             jogo.get("odd_casa")
             or jogo.get("home_price")
@@ -99,11 +110,6 @@ def buscar_jogos_do_dia(data_str: str):
     return jogos
 
 
-# =====================================
-# FORMATAR MENSAGEM PARA TELEGRAM
-# - Lista todos os jogos do dia
-# - Mostra liga, horário, times e odd (se tiver)
-# =====================================
 def formatar_mensagem_jogos(jogos, data_str: str):
     if not jogos:
         return (
@@ -125,9 +131,6 @@ def formatar_mensagem_jogos(jogos, data_str: str):
     return texto
 
 
-# =====================================
-# LOOP PRINCIPAL
-# =====================================
 def rodar_bot_uma_vez():
     print("\n🚀 BOT INICIADO (execução única)\n")
 
@@ -135,8 +138,11 @@ def rodar_bot_uma_vez():
     print(f"📅 Buscando jogos do dia: {data_str}")
 
     jogos = buscar_jogos_do_dia(data_str)
-
     msg = formatar_mensagem_jogos(jogos, data_str)
+
+    if not CHAT_ID:
+        print("❌ Não foi possível enviar a mensagem: CHAT_ID não configurado.")
+        return
 
     try:
         bot.send_message(chat_id=CHAT_ID, text=msg, parse_mode="Markdown")
@@ -146,11 +152,6 @@ def rodar_bot_uma_vez():
         print(e)
 
 
-# =====================================
-# EXECUÇÃO CONTÍNUA (A CADA 1 HORA)
-# Se quiser só 1 vez por dia, você pode remover o while True
-# e chamar apenas rodar_bot_uma_vez()
-# =====================================
 if __name__ == "__main__":
     while True:
         try:
@@ -159,6 +160,5 @@ if __name__ == "__main__":
             print("❌ Erro inesperado no loop principal do bot:")
             print(e)
 
-        # Espera 1 hora para rodar de novo
         print("⏳ Aguardando 1 hora para a próxima execução...\n")
         time.sleep(3600)
