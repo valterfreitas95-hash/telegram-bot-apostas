@@ -39,12 +39,23 @@ def enviar_telegram(msg: str):
         "text": msg,
         "parse_mode": "Markdown",
     }
+    print("📨 Enviando mensagem ao Telegram...")  # DEBUG
+
     try:
         resp = requests.post(url, json=payload, timeout=20)
+        print("📡 Código de resposta do Telegram:", resp.status_code)
+        print("🧾 Corpo da resposta:", resp.text)
+
         resp.raise_for_status()
         print("📤 Mensagem enviada com sucesso ao Telegram.")
+
     except Exception as e:
         print("❌ Erro ao enviar mensagem para o Telegram:", e)
+        try:
+            print("Resposta do Telegram:", resp.text)
+        except:
+            pass
+
         try:
             print("Resposta:", resp.text)
         except Exception:
